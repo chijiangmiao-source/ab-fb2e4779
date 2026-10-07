@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隔离维护站 · 委托包核验台</title>
+<style>
+  :root { --ok:#137333; --bad:#b3261e; --muted:#5f6368; --line:#dadce0; --bg:#f8f9fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:#202124; }
+  header { background:#1a237e; color:#fff; padding:14px 24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  #health { font-size:12px; padding:2px 10px; border-radius:12px; background:#444; }
+  #health.up { background:#2e7d32; } #health.down { background:#b3261e; }
+  main { max-width:1180px; margin:0 auto; padding:20px 16px 60px; display:grid; gap:18px; }
+  section { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 18px; }
+  h2 { font-size:15px; margin:0 0 12px; color:#1a237e; }
+  label { font-size:13px; color:var(--muted); display:block; margin:10px 0 4px; }
+  textarea { width:100%; font-family:ui-monospace,Consolas,monospace; font-size:12px; border:1px solid var(--line); border-radius:6px; padding:8px; resize:vertical; }
+  select,button { font-size:13px; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:#1a237e; color:#fff; border-color:#1a237e; }
+  button.warn { background:#b3261e; color:#fff; border-color:#b3261e; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .banner { padding:10px 14px; border-radius:8px; font-size:14px; margin:10px 0; }
+  .banner.ok { background:#e6f4ea; color:var(--ok); }
+  .banner.bad { background:#fce8e6; color:var(--bad); }
+  .banner.info { background:#e8f0fe; color:#174ea6; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:8px; }
+  th,td { border:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; }
+  th { background:#f1f3f4; }
+  .mono { font-family:ui-monospace,Consolas,monospace; word-break:break-all; }
+  .pass { color:var(--ok); } .fail { color:var(--bad); font-weight:600; }
+  pre { background:#f6f8fa; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px; overflow:auto; max-height:340px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:900px){ .grid2{grid-template-columns:1fr;} }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; background:#e8f0fe; color:#174ea6; margin-right:4px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>隔离维护站 · 委托包核验台</h1>
+  <span id="health">健康检查…</span>
+  <span style="font-size:12px;opacity:.8">提交动作前请先逐级检查：每一级权限只能收窄，末级凭据单次有效</span>
+</header>
+<main>
+  <section>
+    <h2>① 演练包加载</h2>
+    <div class="row">
+      <select id="scenario">
+        <option value="valid">valid · 有效委托链</option>
+        <option value="tampered">tampered · 已签字段被篡改</option>
+        <option value="out_of_scope">out_of_scope · 越权命令</option>
+        <option value="expired">expired · 已过有效期</option>
+        <option value="revoked">revoked · 含有效撤销声明</option>
+      </select>
+      <button id="loadDemo">加载演练包</button>
+      <span id="demoNote" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>② 委托包与待执行命令</h2>
+    <div class="grid2">
+      <div>
+        <label>委托包（规范 UTF-8 JSON：Ed25519 委托链 + 撤销声明）</label>
+        <textarea id="pkg" rows="16" spellcheck="false" placeholder='{"chain":[...],"revocations":[...]}'></textarea>
+      </div>
+      <div>
+        <label>待执行命令请求</label>
+        <textarea id="req" rows="16" spellcheck="false" placeholder='{"device":"pump-01","command":"restart","params":{}}'></textarea>
+        <div class="row" style="margin-top:10px">
+          <button id="inspectBtn" class="primary">逐级检查</button>
+          <button id="executeBtn" class="warn">提交执行</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="reportSec" class="hidden">
+    <h2>③ 逐级核验报告</h2>
+    <div id="firstError"></div>
+    <div id="summary"></div>
+    <div id="levels"></div>
+    <div id="revocations"></div>
+    <div id="requestChecks"></div>
+  </section>
+
+  <section id="receiptSec" class="hidden">
+    <h2>④ 执行回执</h2>
+    <div id="receiptBanner"></div>
+    <pre id="receiptJson"></pre>
+  </section>
+
+  <section>
+    <h2>⑤ 已持久化裁决（重启后仍可复核）</h2>
+    <div class="row"><button id="refreshVerdicts">刷新列表</button><span id="verdictCount" style="font-size:12px;color:var(--muted)"></span></div>
+    <div id="verdicts"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const short = s => s ? s.slice(0, 18) + "…" : "—";
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data };
+}
+function parseArea(id) {
+  const raw = $(id).value.trim();
+  if (!raw) throw new Error((id === "pkg" ? "委托包" : "请求") + "不能为空");
+  return JSON.parse(raw);
+}
+function showError(where, msg) {
+  $(where).innerHTML = `<div class="banner bad">⚠ ${msg}</div>`;
+}
+
+async function pollHealth() {
+  try {
+    const { status, data } = await api("/healthz");
+    $("health").textContent = status === 200 ? `健康 · 已存裁决 ${data.verdicts_persisted}` : "异常";
+    $("health").className = status === 200 ? "up" : "down";
+  } catch { $("health").textContent = "不可达"; $("health").className = "down"; }
+}
+
+$("loadDemo").onclick = async () => {
+  const { data } = await api("/api/demo");
+  if (!data.ok) { $("demoNote").textContent = "演练包不可用"; return; }
+  const sc = data.scenarios[$("scenario").value];
+  $("pkg").value = JSON.stringify(sc.package, null, 2);
+  $("req").value = JSON.stringify(sc.request, null, 2);
+  $("demoNote").textContent = sc.note;
+};
+
+function renderReport(rep) {
+  $("reportSec").classList.remove("hidden");
+  $("firstError").innerHTML = rep.ok
+    ? `<div class="banner ok">✔ 全部检查通过，可提交执行</div>`
+    : `<div class="banner bad">✘ 首个拒因：${rep.first_error || "未知"}</div>`;
+  const s = rep.summary || {};
+  $("summary").innerHTML = `<table><tr><th>根公钥</th><th>链摘要</th><th>叶项标识</th><th>裁决键</th><th>叶凭据已用</th></tr>
+    <tr><td class="mono">${short(s.root_key)}</td><td class="mono">${short(s.chain_digest)}</td>
+    <td class="mono">${s.leaf_id || "—"}</td><td class="mono">${short(s.verdict_key)}</td>
+    <td>${s.leaf_already_used === null || s.leaf_already_used === undefined ? "—" : (s.leaf_already_used ? '<span class="fail">是</span>' : "否")}</td></tr></table>`;
+  $("levels").innerHTML = (rep.levels || []).map(l => `
+    <h3 style="font-size:13px;margin:14px 0 4px">第 ${l.index} 级 ·
+      <span class="${l.signature_valid ? "pass" : "fail"}">${l.signature_valid ? "签名✓" : "签名✗"}</span>
+      <span class="tag">${l.issuer} → ${l.delegate}</span></h3>
+    <table>
+      <tr><th>主体</th><th>设备范围</th><th>命令集合</th><th>生效窗口</th><th>摘要</th></tr>
+      <tr><td class="mono">${l.issuer} → ${l.delegate}</td>
+          <td>${l.devices.map(d => `<span class="tag">${d}</span>`).join("")}</td>
+          <td>${l.commands.map(c => `<span class="tag">${c}</span>`).join("")}</td>
+          <td class="mono">${l.not_before}<br>~ ${l.not_after}</td>
+          <td class="mono">${short(l.digest)}</td></tr>
+    </table>
+    <table><tr><th>检查项</th><th>结果</th><th>说明</th></tr>
+      ${l.checks.map(c => `<tr><td class="mono">${c.name}</td>
+        <td class="${c.ok ? "pass" : "fail"}">${c.ok ? "✓" : "✗"}</td><td>${c.detail}</td></tr>`).join("")}
+    </table>`).join("");
+  $("revocations").innerHTML = (rep.revocations && rep.revocations.length)
+    ? `<h3 style="font-size:13px;margin:14px 0 4px">撤销声明</h3><table>
+       <tr><th>#</th><th>目标摘要</th><th>目标层级</th><th>有效性</th><th>说明</th></tr>
+       ${rep.revocations.map(r => `<tr><td>${r.index}</td><td class="mono">${short(r.target_digest)}</td>
+         <td>${r.target_level === null ? "—" : r.target_level}</td>
+         <td class="${r.valid ? "fail" : "pass"}">${r.valid ? "有效（触发拒绝）" : "无效"}</td>
+         <td>${r.detail}</td></tr>`).join("")}</table>` : "";
+  $("requestChecks").innerHTML = (rep.request && rep.request.length)
+    ? `<h3 style="font-size:13px;margin:14px 0 4px">请求核对</h3><table>
+       <tr><th>检查项</th><th>结果</th><th>说明</th></tr>
+       ${rep.request.map(c => `<tr><td class="mono">${c.name}</td>
+         <td class="${c.ok ? "pass" : "fail"}">${c.ok ? "✓" : "✗"}</td><td>${c.detail}</td></tr>`).join("")}</table>` : "";
+}
+
+$("inspectBtn").onclick = async () => {
+  let payload;
+  try { payload = { package: parseArea("pkg"), request: parseArea("req") }; }
+  catch (e) { $("reportSec").classList.remove("hidden"); showError("firstError", e.message); $("levels").innerHTML = $("summary").innerHTML = $("revocations").innerHTML = $("requestChecks").innerHTML = ""; return; }
+  $("inspectBtn").disabled = true;
+  try {
+    const { data } = await api("/api/inspect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    renderReport(data);
+  } finally { $("inspectBtn").disabled = false; }
+};
+
+$("executeBtn").onclick = async () => {
+  let payload;
+  try { payload = { package: parseArea("pkg"), request: parseArea("req") }; }
+  catch (e) { $("receiptSec").classList.remove("hidden"); showError("receiptBanner", e.message); $("receiptJson").textContent = ""; return; }
+  $("executeBtn").disabled = true;
+  try {
+    const { status, data } = await api("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    $("receiptSec").classList.remove("hidden");
+    if (data.ok) {
+      $("receiptBanner").innerHTML = `<div class="banner ok">✔ 执行完成（HTTP ${status}）${data.replay ? " · 幂等重放：同一回执" : " · 首次执行"}</div>`;
+      $("receiptJson").textContent = JSON.stringify(data.receipt, null, 2);
+    } else {
+      $("receiptBanner").innerHTML = `<div class="banner bad">✘ 拒绝执行（HTTP ${status}）：${data.error}</div>`;
+      $("receiptJson").textContent = "";
+    }
+    if (data.report) renderReport(data.report);
+    loadVerdicts(); pollHealth();
+  } finally { $("executeBtn").disabled = false; }
+};
+
+async function loadVerdicts() {
+  const { data } = await api("/api/verdicts");
+  const vs = data.verdicts || [];
+  $("verdictCount").textContent = `共 ${vs.length} 条`;
+  $("verdicts").innerHTML = vs.length ? `<table>
+    <tr><th>裁决键</th><th>叶项标识</th><th>设备</th><th>命令</th><th>执行时间</th><th>回执编号</th></tr>
+    ${vs.map(v => `<tr><td class="mono">${short(v.verdict_key)}</td><td class="mono">${v.leaf_id}</td>
+      <td>${v.receipt.device}</td><td>${v.receipt.command}</td><td class="mono">${v.receipt.executed_at}</td>
+      <td class="mono">${v.receipt.receipt_id}</td></tr>`).join("")}</table>`
+    : `<div class="banner info">暂无持久化裁决</div>`;
+}
+$("refreshVerdicts").onclick = loadVerdicts;
+pollHealth(); loadVerdicts(); setInterval(pollHealth, 10000);
+</script>
+</body>
+</html>
